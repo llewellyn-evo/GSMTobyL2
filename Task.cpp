@@ -99,23 +99,30 @@ namespace Transports
         param("PIN", m_args.pin)
         .defaultValue("")
         .description("PIN Code");
+
+        param("APN", m_args.apn_name)
+        .defaultValue("web.vodafone.de")
+        .description("APN Code");
       }
 
       //! Update internal state with new parameter values.
       void
       onUpdateParameters(void)
       {
-        if (paramChanged(m_args.pin) || paramChanged(m_args.uart_dev) || paramChanged(m_args.uart_baud) || paramChanged(m_args.apn_name))
+        if (m_modem)
         {
-          throw RestartNeeded(DTR("restarting to change parameters"), 1);
-        }
-        else if (paramChanged(m_args.rssi_querry_per))
-        {
-          m_modem->setRssiTimer(m_args.rssi_querry_per);
-        }
-        else if (paramChanged(m_args.nwk_querry_per))
-        {
-          m_modem->setNtwkTimer(m_args.nwk_querry_per);
+          if (paramChanged(m_args.pin) || paramChanged(m_args.uart_dev) || paramChanged(m_args.uart_baud) || paramChanged(m_args.apn_name))
+          {
+            throw RestartNeeded(DTR("restarting to change parameters"), 1);
+          }
+          else if (paramChanged(m_args.rssi_querry_per))
+          {
+            m_modem->setRssiTimer(m_args.rssi_querry_per);
+          }
+          else if (paramChanged(m_args.nwk_querry_per))
+          {
+            m_modem->setNtwkTimer(m_args.nwk_querry_per);
+          }
         }
       }
 
@@ -141,7 +148,7 @@ namespace Transports
         pcc.op = IMC::PowerChannelControl::PCC_OP_TURN_ON;
         dispatch(pcc);
         //! Wait here for 5 seconds to kernel to detect and bring the device UP
-        Delay::waitNsec(5000000000);
+        //Delay::waitNsec(5000000000);
         //! Create Handle for Serial Port to configure GSM Modem
         m_uart = new SerialPort(m_args.uart_dev, m_args.uart_baud);
         m_modem = new TobyL2(this , m_uart);
