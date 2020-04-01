@@ -148,17 +148,23 @@ namespace Transports
         pcc.op = IMC::PowerChannelControl::PCC_OP_TURN_ON;
         dispatch(pcc);
         //! Wait here for 5 seconds to kernel to detect and bring the device UP
-        //Delay::waitNsec(5000000000);
+        Delay::waitNsec(5000000000);
         //! Create Handle for Serial Port to configure GSM Modem
+
         m_uart = new SerialPort(m_args.uart_dev, m_args.uart_baud);
-        m_modem = new TobyL2(this , m_uart);
+        if (!m_modem)
+        {
+          m_modem = new TobyL2(this , m_uart);
+          m_modem->initTobyL2(m_args.apn_name ,  m_args.pin , m_args.rssi_querry_per ,  m_args.nwk_querry_per);
+        }
+        
       }
 
       //! Initialize resources.
       void
       onResourceInitialization(void)
       {
-        m_modem->initTobyL2(m_args.apn_name ,  m_args.pin , m_args.rssi_querry_per ,  m_args.nwk_querry_per);
+        
       }
 
       //! Release resources.
@@ -173,6 +179,7 @@ namespace Transports
       void
       onMain(void)
       {
+
         while (!stopping())
         {
           m_modem->updateTobyL2();

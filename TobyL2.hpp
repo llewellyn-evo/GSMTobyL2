@@ -42,22 +42,19 @@ namespace Transports
       m_task(task)
       {
         setLineTrim(true);
+        setReadMode(READ_MODE_LINE);
+        start();
       }
 
       ~TobyL2()
       {
-
+        
       }
 
       void 
       initTobyL2(const std::string apn , const std::string pin , const float rssi_timer , const float ntwk_timer)
       {
         m_task->inf("Initializing the Modem");
-        flushInput();
-        // Perform initialization.
-        setReadMode(READ_MODE_LINE);
-        start();
-        sendInitialization();
         setEcho(false);
         setAirplaneMode(true);
         //! Get IMEI
@@ -66,14 +63,18 @@ namespace Transports
         //! Set Verbose Output
         setErrorVerbosity(2);
         //! Set PIN if needed       
-        setPIN(pin);
-        //! Get IMSI
-        m_IMSI = getIMSI();
-        m_task->inf("IMSI : %s " , m_IMSI.c_str());
+        if (setPIN(pin) > -1)
+        {
+          //! Get IMSI
+          m_IMSI = getIMSI();
+          m_task->inf("IMSI : %s " , m_IMSI.c_str());
+        }
         //! Set APN to connect to
         setAPN(apn);
+        //! Configure SMS Properties
+        configureSMS(); 
         //! Remore from Airplane Mode
-        setAirplaneMode(false); 
+        setAirplaneMode(false);
         setRssiTimer(rssi_timer);
         setNtwkTimer(ntwk_timer);
       }
@@ -98,7 +99,7 @@ namespace Transports
           {
             case INITIAL_STATE:
             {
-              if (checkSIMStatus() == "+CPIN: READY")
+              if (checkSIMStatus() == 1)
               {
                 m_modem_state++;;
               }
@@ -114,25 +115,21 @@ namespace Transports
               int ntwk_register = checkNetworkRegistration();
               //! ntwk_registration 1 is registered to home netowrk
               //! ntwk_registration 5 is registered to roaming network
-              m_task->inf("Registration Value %d" , ntwk_register);
+              m_task->inf("Network Registration Value %d" , ntwk_register);
               if (ntwk_register == 1 || ntwk_register == 5 )
               {
                 m_modem_state++;
               }
-              else if (ntwk_register == 0)
-              {
-                //! Manually Start Registration Again
-                startNetworkRegistration();
-              }
+
               break;
             }
 
             case NETWORK_REGISTRATION_DONE:
             {
               int rat_type = getRATType();
-              m_task->inf("RAT Type %d " , rat_type);
+              m_task->inf("Radio Access Technology Type %d " , rat_type);
 
-              if (rat_type > 0 && rat_type < 7)
+              if (rat_type > 0 && rat_type < 7 && !checkPDPContext())
               {
                 //! RAT 1 = GSM COMPACT
                 //! RAT 2 = UTRAN
@@ -144,7 +141,7 @@ namespace Transports
                 activatePDPContext();
                 m_modem_state++;
               }
-              else if (rat_type == 7)
+              else
               {
                 //! Connected to LTE network Do not thing Modem auto connents to internet
                 m_modem_state++;
@@ -155,13 +152,13 @@ namespace Transports
             case PDP_CONTEXT_ATTACHED:
             {
               //! Check PDP Context
-              int status =  getPDPContext();
-              m_task->inf("CGACT Status %d " , status);
-              if (status == 1)
+              bool status =  checkPDPContext();
+              m_task->inf("PDP Context Status %d " , status);
+              if (status == true)
               {
                 m_modem_state++;
               }
-              else if (status == 0)
+              else if (status == false)
               {
                 m_modem_state = INITIAL_STATE;
               }
@@ -170,7 +167,18 @@ namespace Transports
 
             case NETWORK_CONNECTION_OK:
             {
-              m_modem_state = INITIAL_STATE;
+              bool status =  checkPDPContext();
+              if ( status == false)
+              {
+                m_modem_state = INITIAL_STATE;
+              }
+              else
+              {
+                if (pingRemote("www.google.com") < 0)
+                {
+                  m_modem_state = INITIAL_STATE;
+                }  
+              }
               break;
             }
           }
@@ -193,49 +201,131 @@ namespace Transports
 
     private:
 
+      int
+      pingRemote(std::string remote)
+      {
+        int round_trip_time = -1;
+        sendAT("+UPING=\""+remote+"\",1,32,2000,255");
+        std::string line = readLine();
+        if (line == "OK")
+        {
+          line = readLine();
+          //+UUPING: 1,32,\"www.google.com\","172.217.23.100",53,260
+          std::vector<std::string> tokens;
+          std::istringstream ss(line);
+          std::string token;
+          while(std::getline(ss, token, ','))
+          {
+            tokens.push_back(token);
+          }
+          m_task->inf("Ping Value %s " , tokens[5].c_str());
+          round_trip_time = std::stoi(tokens[5]);
+        }
+        return round_trip_time;
+      }
+
+
+      void
+      configureSMS()
+      {
+        //! Set Charater set to IRA
+        sendAT("+CSCS=\"IRA\"");
+        expectOK();
+        //! Select procedure to indicate new Message
+        sendAT("+CNMI=2,2");
+        expectOK();
+        //! Select Text mode as prefered message format
+        sendAT("+CMGF=1");
+        expectOK();
+      }
+
 
       void
       activatePDPContext()
       {
         sendAT("+CGACT=1,1");
         expectOK();
+        //! Map PSD profile 0 to 1
+        sendAT("+UPSD=0,100,1");
+        expectOK();
+        //! Set PDP Type IPv4
+        sendAT("+UPSD=0,0,0");
+        expectOK();
+        //! Activate Internal PSD
+        sendAT("+UPSDA=0,3");
+        expectOK();
+        std::string line = readLine();
       }
 
-      int 
-      getPDPContext()
+      bool 
+      checkPDPContext()
       {
-        int status = -1 , cid = -1;
+        uint8_t ok = 0; 
+        std::vector<std::string> arr;
         sendAT("+CGACT?");
         //! +CGACT: 1,1
-        std::string line = readLine();
-        expectOK();
-        std::sscanf(line.c_str(), "+CGACT: %d,%d", &cid, &status);
-        return status;
-      }
-
-      void 
-      setPIN(const std::string pin)
-      {
-        std::string bfr =  checkSIMStatus();
-        if (bfr == "+CPIN: READY")
+        while (!ok)
         {
-          m_task->inf("PIN ready");
-          return;
+          std::string line = readLine();
+          if (line == "OK")
+          {
+            ok = 1;
+          }
+          else
+          {
+            arr.push_back(line);
+          }
+          
         }
 
-        if (bfr == "+CPIN: SIM PIN")
+        for (uint8_t i = 0 ; i < arr.size() ; i++)
+        {
+          int status = -1 , cid = -1;
+          std::sscanf(arr[i].c_str(), "+CGACT: %d,%d", &cid, &status);
+          if (status > 0)
+          {
+            //! Atleast one PDP context is active
+            return true;
+          }
+        }        
+        return false;
+      }
+
+      int
+      setPIN(const std::string pin)
+      {
+        int value =  checkSIMStatus();
+        if (value == 1)
+        {
+          return 1;
+        }
+        else if (value == -2)
         {
           sendAT(String::str("+CPIN=%s", pin.c_str()));
           expectOK();
-
+          return 1;
         }
-        m_task->err("Exitting pin");
+        else
+        {
+          return -1;
+        }
       }
 
-      std::string 
+      int 
       checkSIMStatus()
       {
-        return readValue("+CPIN?");
+        std::string bfr = readValue("+CPIN?");
+
+        if (bfr == "+CPIN: READY")
+        {
+          return 1;
+        }
+        else if (bfr == "+CPIN: SIM PIN")
+        {
+          return -2;
+        }
+
+        return -1;
       }
 
       int
@@ -269,13 +359,6 @@ namespace Transports
         return stat;
       }
 
-      void
-      startNetworkRegistration()
-      {
-        sendAT("+COPS=0");
-        expectOK();
-      }
-
       void 
       setAPN(const std::string apn)
       {
@@ -295,7 +378,7 @@ namespace Transports
         }
         else 
         {
-          //! Set Full Funtionality Mode with silent reset
+          //! Set Full Funtionality Mode
           sendAT("+CFUN=1");
           expectOK();
         }
