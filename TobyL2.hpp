@@ -1,5 +1,9 @@
 #ifndef TRANSPORTS_GPS_TOBY_L2_INCLUDED
 #define TRANSPORTS_GPS_TOBY_L2_INCLUDED
+// ISO C++ 98 headers.
+#include <cstring>
+#include <queue>
+#include <cstddef>
 
 // DUNE headers.
 #include <DUNE/DUNE.hpp>
@@ -16,10 +20,50 @@ namespace Transports
       NETWORK_CONNECTION_OK     = 4
     };
 
+    //! SMS terminator character.
+    static const char c_sms_term = 0x1a;
+    //! SMS input prompt.
+    static const char* c_sms_prompt = "\r\n> ";
+    //! Size of SMS input prompt.
+    static const unsigned c_sms_prompt_size = std::strlen(c_sms_prompt);
+
+
     using DUNE_NAMESPACES;
     class TobyL2 : public HayesModem
     {
     public:
+      struct SmsRequest
+      {
+        // Request id.
+        uint16_t req_id;
+        // Source address.
+        uint16_t src_adr;
+        // Source entity id.
+        uint8_t src_eid;
+        // Recipient.
+        std::string destination;
+        // Message to send.
+        std::string sms_text;
+        // Deadline to deliver the
+        double deadline;
+        // Higher deadlines have less priority.
+        bool
+        operator<(const SmsRequest& other) const
+        {
+          return deadline > other.deadline;
+        }
+      };
+
+      struct SMS
+      {
+        // Recipient.
+        std::string recipient;
+        // Message to send.
+        std::string message;
+        // Delivery deadline.
+        double deadline;
+      };
+
       //! Parent task.
       Tasks::Task* m_task;
       //! Timer for RSSI Querry
@@ -36,14 +80,22 @@ namespace Transports
       uint8_t m_modem_state = INITIAL_STATE;
       //! Signal Strength
       float m_rssi;
+      //! SMS queue.
+      std::priority_queue<SmsRequest> m_queue;
+      //! SMS timeout
+      double m_sms_tout;
 
       TobyL2(Tasks::Task* task , SerialPort* uart):
       HayesModem(task, uart),
       m_task(task)
       {
+        sendReset();
+        Time::Delay::wait(2.0);
         setLineTrim(true);
         setReadMode(READ_MODE_LINE);
+        flushInput();
         start();
+        sendInitialization();
       }
 
       ~TobyL2()
@@ -52,9 +104,12 @@ namespace Transports
       }
 
       void 
-      initTobyL2(const std::string apn , const std::string pin , const float rssi_timer , const float ntwk_timer)
+      initTobyL2(const std::string apn , const std::string pin , const float rssi_timer , const float ntwk_timer , const double smstout)
       {
+        m_sms_tout = smstout;
         m_task->inf("Initializing the Modem");
+        setRssiTimer(rssi_timer);
+        setNtwkTimer(ntwk_timer);
         setEcho(false);
         setAirplaneMode(true);
         //! Get IMEI
@@ -72,11 +127,9 @@ namespace Transports
         //! Set APN to connect to
         setAPN(apn);
         //! Configure SMS Properties
-        configureSMS(); 
+        setMessageFormat(1);
         //! Remore from Airplane Mode
         setAirplaneMode(false);
-        setRssiTimer(rssi_timer);
-        setNtwkTimer(ntwk_timer);
       }
 
       void 
@@ -95,6 +148,12 @@ namespace Transports
 
         if (m_ntwk_querry_timer.overflow())
         {
+          if (m_modem_state > NETWORK_REGISTRATION_DONE)
+          {
+            checkMessages();
+            processSMSQueue();
+          }
+
           switch(m_modem_state)
           {
             case INITIAL_STATE:
@@ -198,13 +257,204 @@ namespace Transports
         m_ntwk_querry_timer.setTop(ntwk_timer);
       }
 
+      void
+      sendSmsStatus(const SmsRequest* sms_req,IMC::SmsStatus::StatusEnum status,const std::string& info = "")
+      {
+        IMC::SmsStatus sms_status;
+        sms_status.setDestination(sms_req->src_adr);
+        sms_status.setDestinationEntity(sms_req->src_eid);
+        sms_status.req_id = sms_req->req_id;
+        sms_status.info   = info;
+        sms_status.status = status;
+
+        m_task->dispatch(sms_status);
+      }
+
 
     private:
+      void
+      sendSMS(const std::string& number, const std::string& msg, double timeout)
+      {
+        uint8_t bfr[16];
+
+        Time::Counter<double> timer(timeout);
+
+        try
+        {
+          setReadMode(HayesModem::READ_MODE_RAW);
+          sendAT(String::str("+CMGS=\"%s\"", number.c_str()));
+          readRaw(timer, bfr, 4);
+          setReadMode(HayesModem::READ_MODE_LINE);
+
+          if (std::memcmp(bfr, c_sms_prompt, c_sms_prompt_size) != 0)
+            throw Hardware::UnexpectedReply();
+
+          std::string data = msg;
+          data.push_back(c_sms_term);
+          sendRaw((uint8_t*)&data[0], data.size());
+        }
+        catch (...)
+        {
+          setReadMode(HayesModem::READ_MODE_LINE);
+          throw;
+        }
+
+        std::string reply = readLine(timer);
+        if (reply == "ERROR")
+        {
+          throw std::runtime_error(DTR("unknown error"));
+        }
+        else if (String::startsWith(reply, "+CMGS:"))
+        {
+          setBusy(true);
+        }
+        else if (String::startsWith(reply, "+CMS ERROR:"))
+        {
+          int code = -1;
+          std::sscanf(reply.c_str(), "+CMS ERROR: %d", &code);
+          throw std::runtime_error(String::str(DTR("SMS transmission failed with error code %d"), code));
+        }
+        else
+        {
+          throw UnexpectedReply();
+        }
+
+        expectOK();
+      }
+
+      void
+      checkMessages(void)
+      {
+        IMC::TextMessage sms;
+        std::string location;
+        unsigned read_count = 0;
+        bool text_mode = true;
+        sendAT("+CMGL=\"ALL\"");
+
+        //! Read all messages.
+        while (readSMS(location, sms.origin, sms.text,text_mode))
+        {
+          if ((location == "\"REC UNREAD\"") || (location == "\"REC READ\""))
+          {
+            ++read_count;
+            if(text_mode)
+            {
+              m_task->inf("Recieved sms from %s , Message %s " , sms.origin.c_str() , sms.text.c_str() );
+              m_task->dispatch(sms);
+            }
+          }
+        }
+        // Remove read messages.
+        if (read_count > 0)
+        {
+          sendAT("+CMGD=0,3");
+          expectOK();
+        }
+      }
+
+      bool
+      readSMS(std::string& location, std::string& origin, std::string& text, bool& text_mode)
+      {
+        std::string header = readLine();
+        if (header == "OK")
+          return false;
+
+        if (!String::startsWith(header, "+CMGL:"))
+          throw Hardware::UnexpectedReply();
+
+        std::vector<std::string> parts;
+        String::split(header, ",", parts);
+        if (parts.size() != 6)
+        {
+          if (parts.size() >= 2)
+          {
+            location = parts[1];
+            return true;
+          }
+
+          throw Hardware::UnexpectedReply();
+        }
+
+        if ((parts[2] != "\"\"") && (parts[2].size() <= 2))
+          throw Hardware::UnexpectedReply();
+
+        location = parts[1];
+        origin = std::string(parts[2], 1, parts[2].size() - 2);
+        std::string incoming_data = readLine();
+
+        if(Algorithms::Base64::validBase64(incoming_data))
+        {
+          text_mode = false;
+          Utils::ByteBuffer bfr;
+      std::string decoded = Algorithms::Base64::decode(incoming_data);
+      std::copy(decoded.begin(),decoded.end(),bfr.getBuffer());
+      uint16_t length = decoded.size();
+      try
+      {
+        IMC::Message* msg_d = IMC::Packet::deserialize(bfr.getBuffer(), length);
+        m_task->inf(DTR("received IMC message of type %s via SMS"),msg_d->getName());
+        m_task->dispatch(msg_d);
+      }
+      catch(...) //InvalidSync || InvalidMessageId || InvalidCrc
+      {
+        m_task->war(DTR("Parsing unrecognized Base64 message as text"));
+        text.assign(incoming_data);
+        text_mode = true;
+        return true;
+      }
+        }
+        else
+        {
+          text.assign(incoming_data);
+          text_mode = true;
+        }
+        return true;
+      }
+      void
+      setMessageFormat(unsigned value)
+      {
+        sendAT(String::str("+CMGF=%u", value));
+        expectOK();
+      }
+
+      void
+      processSMSQueue(void)
+      {
+        if (m_queue.empty())
+        {
+          return;
+        }
+
+        SmsRequest sms_req = m_queue.top();
+        m_queue.pop();
+
+        // Message is too old, discard it.
+        if (Time::Clock::getSinceEpoch() >= sms_req.deadline)
+        {
+          sendSmsStatus(&sms_req,IMC::SmsStatus::SMSSTAT_INPUT_FAILURE,DTR("SMS timeout"));
+          m_task->war(DTR("discarded expired SMS to recipient %s"), sms_req.destination.c_str());
+          return;
+        }
+
+        try
+        {
+          sendSMS(sms_req.destination, sms_req.sms_text, m_sms_tout);
+          //SMS successfully sent, otherwise driver throws error
+          sendSmsStatus(&sms_req,IMC::SmsStatus::SMSSTAT_SENT);
+        }
+        catch (...)
+        {
+          m_queue.push(sms_req);
+          sendSmsStatus(&sms_req,IMC::SmsStatus::SMSSTAT_ERROR,
+                        DTR("Error sending message over GSM modem"));
+          m_task->inf(DTR("Error sending SMS to recipient %s"),sms_req.destination.c_str());
+        }
+      }
 
       int
       pingRemote(std::string remote)
       {
-        int round_trip_time = -1;
+        int round_trip_time = -1; 
         sendAT("+UPING=\""+remote+"\",1,32,2000,255");
         std::string line = readLine();
         if (line == "OK")
@@ -223,22 +473,6 @@ namespace Transports
         }
         return round_trip_time;
       }
-
-
-      void
-      configureSMS()
-      {
-        //! Set Charater set to IRA
-        sendAT("+CSCS=\"IRA\"");
-        expectOK();
-        //! Select procedure to indicate new Message
-        sendAT("+CNMI=2,2");
-        expectOK();
-        //! Select Text mode as prefered message format
-        sendAT("+CMGF=1");
-        expectOK();
-      }
-
 
       void
       activatePDPContext()

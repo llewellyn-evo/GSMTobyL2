@@ -54,6 +54,10 @@ namespace Transports
       float nwk_querry_per;
       //! GSM Pin.
       std::string pin;
+      //! SMS send timeout (s).
+      double sms_tout;
+      //! start GSM by default flag
+      bool start_gsm;
     };
 
   namespace GSMTobyL2
@@ -65,9 +69,11 @@ namespace Transports
       //! Task arguments.
       Arguments m_args;
       //! Serial port handle.
-      SerialPort* m_uart;
+      SerialPort* m_uart = NULL;
       //! Toby L2
-      TobyL2* m_modem;
+      TobyL2* m_modem = NULL;
+      //! Channel State
+      bool m_channel_state = false;
       //! Constructor.
       //! @param[in] name task name.
       //! @param[in] ctx context.
@@ -103,6 +109,18 @@ namespace Transports
         param("APN", m_args.apn_name)
         .defaultValue("web.vodafone.de")
         .description("APN Code");
+
+        param("Turn GSM ON", m_args.start_gsm)
+        .defaultValue("false")
+        .description("Flag to turn GSM ON by Default");
+
+        param("SMS Send Timeout", m_args.sms_tout)
+        .defaultValue("60")
+        .units(Units::Second)
+        .description("Maximum amount of time to wait for SMS send completion");
+
+        bind<IMC::PowerChannelState>(this);
+        bind<IMC::SmsRequest>(this);
       }
 
       //! Update internal state with new parameter values.
@@ -146,18 +164,31 @@ namespace Transports
         IMC::PowerChannelControl pcc;
         pcc.name = m_args.pwr_channel_name;
         pcc.op = IMC::PowerChannelControl::PCC_OP_TURN_ON;
-        dispatch(pcc);
-        //! Wait here for 5 seconds to kernel to detect and bring the device UP
-        Delay::waitNsec(5000000000);
         //! Create Handle for Serial Port to configure GSM Modem
+        while (!m_channel_state && !stopping())
+        {
+          Time::Delay::wait(2.0);
+          if (m_args.start_gsm)
+            dispatch(pcc);
+          waitForMessages(0.05);
+          this->inf("Waiting for channel to be turned ON");
+        }
+        //! Wait here for 20 seconds to kernel to detect and bring the device UP
+        Time::Delay::wait(20.0);
 
         m_uart = new SerialPort(m_args.uart_dev, m_args.uart_baud);
-        if (!m_modem)
+        if (!m_modem && !stopping())
         {
-          m_modem = new TobyL2(this , m_uart);
-          m_modem->initTobyL2(m_args.apn_name ,  m_args.pin , m_args.rssi_querry_per ,  m_args.nwk_querry_per);
+          try
+          {
+            m_modem = new TobyL2(this , m_uart);
+            m_modem->initTobyL2(m_args.apn_name ,  m_args.pin , m_args.rssi_querry_per ,  m_args.nwk_querry_per , m_args.sms_tout);
+          }
+          catch(...)
+          {
+             throw RestartNeeded(DTR("Restarting.."), 1);
+          }
         }
-        
       }
 
       //! Initialize resources.
@@ -171,15 +202,55 @@ namespace Transports
       void
       onResourceRelease(void)
       {
-        Memory::clear(m_modem);
-        Memory::clear(m_uart);
+        //! Turn OFF GSM Channel
+        IMC::PowerChannelControl pcc;
+        pcc.name = m_args.pwr_channel_name;
+        pcc.op = IMC::PowerChannelControl::PCC_OP_TURN_OFF;
+        dispatch(pcc);
+        //Memory::clear(m_modem);
+        //Memory::clear(m_uart);
+      }
+
+      void
+      consume(const IMC::PowerChannelState* msg)
+      {
+        if (msg->name == m_args.pwr_channel_name)
+        {
+          m_channel_state = (msg->state) ? true:false;
+        }
+      }
+
+      void
+      consume(const IMC::SmsRequest* msg)
+      {
+        TobyL2::SmsRequest sms_req;
+        sms_req.req_id      = msg->req_id;
+        sms_req.destination = msg->destination;
+        sms_req.sms_text    = msg->sms_text;
+        sms_req.src_adr     = msg->getSource();
+        sms_req.src_eid     = msg->getSourceEntity();
+
+        if (msg->timeout <= 0)
+        {
+          m_modem->sendSmsStatus(&sms_req,IMC::SmsStatus::SMSSTAT_INPUT_FAILURE,"SMS timeout cannot be zero");
+          inf("%s", DTR("SMS timeout cannot be zero"));
+          return;
+        }
+        if(sms_req.sms_text.length() > 160) //160 characters encoded in 8-bit alphabet per SMS message
+        {
+          m_modem->sendSmsStatus(&sms_req,IMC::SmsStatus::SMSSTAT_INPUT_FAILURE,"Can only send 160 characters over SMS.");
+          inf("%s", DTR("Can only send 160 characters over SMS"));
+        return;
+        }
+        sms_req.deadline = Clock::getSinceEpoch() + msg->timeout;
+        m_modem->m_queue.push(sms_req);
+        m_modem->sendSmsStatus(&sms_req,IMC::SmsStatus::SMSSTAT_QUEUED,DTR("SMS sent to queue"));
       }
 
       //! Main loop.
       void
       onMain(void)
-      {
-
+      { 
         while (!stopping())
         {
           m_modem->updateTobyL2();
