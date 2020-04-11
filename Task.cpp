@@ -69,16 +69,18 @@ namespace Transports
       //! Task arguments.
       Arguments m_args;
       //! Serial port handle.
-      SerialPort* m_uart = NULL;
+      SerialPort* m_uart;
       //! Toby L2
-      TobyL2* m_modem = NULL;
+      TobyL2* m_modem;
       //! Channel State
       bool m_channel_state = false;
       //! Constructor.
       //! @param[in] name task name.
       //! @param[in] ctx context.
       Task(const std::string& name, Tasks::Context& ctx):
-        DUNE::Tasks::Task(name, ctx)
+        DUNE::Tasks::Task(name, ctx),
+        m_uart(NULL),
+        m_modem(NULL)
       {
         param("Serial Port - Device", m_args.uart_dev)
         .defaultValue("/dev/ttyACM0")
@@ -202,13 +204,13 @@ namespace Transports
       void
       onResourceRelease(void)
       {
-        //! Turn OFF GSM Channel
-        IMC::PowerChannelControl pcc;
-        pcc.name = m_args.pwr_channel_name;
-        pcc.op = IMC::PowerChannelControl::PCC_OP_TURN_OFF;
-        dispatch(pcc);
-        //Memory::clear(m_modem);
-        //Memory::clear(m_uart);
+        if (m_modem)
+        {
+          m_modem->stopAndJoin();
+          delete m_modem;
+          m_modem = NULL;
+        }
+        Memory::clear(m_uart);
       }
 
       void
