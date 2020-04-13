@@ -93,6 +93,7 @@ namespace Transports
         Time::Delay::wait(2.0);
         setLineTrim(true);
         setReadMode(READ_MODE_LINE);
+        setTimeout(7.0);
         flushInput();
         start();
         sendInitialization();
@@ -135,6 +136,8 @@ namespace Transports
       void 
       updateTobyL2()
       {
+        static uint8_t ping_err = 0;
+        static bool setup_psd = true;
         if (m_rssi_querry_timer.overflow())
         {
           if (m_modem_state >= NETWORK_REGISTRATION_DONE )
@@ -186,9 +189,10 @@ namespace Transports
             case NETWORK_REGISTRATION_DONE:
             {
               int rat_type = getRATType();
+              uint8_t pdp = 0 , state = 0;
               m_task->inf("Radio Access Technology Type %d " , rat_type);
 
-              if (rat_type > 0 && rat_type < 7 && !checkPDPContext())
+              if (rat_type > 0 && rat_type < 7 && !checkPDPContext(&pdp , &state))
               {
                 //! RAT 1 = GSM COMPACT
                 //! RAT 2 = UTRAN
@@ -211,7 +215,8 @@ namespace Transports
             case PDP_CONTEXT_ATTACHED:
             {
               //! Check PDP Context
-              bool status =  checkPDPContext();
+              uint8_t pdp = 0 , state = 0;
+              bool status =  checkPDPContext(&pdp , &state);
               m_task->inf("PDP Context Status %d " , status);
               if (status == true)
               {
@@ -226,17 +231,33 @@ namespace Transports
 
             case NETWORK_CONNECTION_OK:
             {
-              bool status =  checkPDPContext();
+              uint8_t pdp = 0 , state = 0;
+              bool status =  checkPDPContext(&pdp , &state);
               if ( status == false)
               {
                 m_modem_state = INITIAL_STATE;
               }
               else
               {
-                if (pingRemote("www.google.com") < 0)
+                int ret = pingRemote("www.google.com");
+                if (ret == -2)
                 {
-                  m_modem_state = INITIAL_STATE;
-                }  
+                  setupPSDProfile();
+                }
+                else if (ret == -1)
+                {
+                  ping_err++;
+                }
+                else if (ret >= 0)
+                {
+                  ping_err = 0;
+
+                  if (ping_err > 4)
+                  {
+                    ping_err = 0;
+                    m_modem_state = INITIAL_STATE;
+                  }
+                }
               }
               break;
             }
@@ -455,22 +476,31 @@ namespace Transports
       int
       pingRemote(std::string remote)
       {
-        int round_trip_time = -1; 
-        sendAT("+UPING=\""+remote+"\",1,32,2000,255");
+        int round_trip_time = -1;
+        sendAT("+UPING=\""+remote+"\",1,32,5000,255");
         std::string line = readLine();
         if (line == "OK")
         {
           line = readLine();
           //+UUPING: 1,32,\"www.google.com\","172.217.23.100",53,260
-          std::vector<std::string> tokens;
-          std::istringstream ss(line);
-          std::string token;
-          while(std::getline(ss, token, ','))
+          if (line.find("+UUPING:") != std::string::npos)
           {
-            tokens.push_back(token);
+            std::vector<std::string> tokens;
+            std::istringstream ss(line);
+            std::string token;
+            while(std::getline(ss, token, ','))
+            {
+              tokens.push_back(token);
+            }
+            m_task->inf("Ping Value %s " , tokens[5].c_str());
+            round_trip_time = std::stoi(tokens[5]);
           }
-          m_task->inf("Ping Value %s " , tokens[5].c_str());
-          round_trip_time = std::stoi(tokens[5]);
+          else if (line.find("+UUPINGER: 17") != std::string::npos)
+          {
+            //! PSD not setup
+            m_task->err("Ping Error");
+            return -2;
+          }
         }
         return round_trip_time;
       }
@@ -480,23 +510,14 @@ namespace Transports
       {
         sendAT("+CGACT=1,1");
         expectOK();
-        //! Map PSD profile 0 to 1
-        sendAT("+UPSD=0,100,1");
-        expectOK();
-        //! Set PDP Type IPv4
-        sendAT("+UPSD=0,0,0");
-        expectOK();
-        //! Activate Internal PSD
-        sendAT("+UPSDA=0,3");
-        expectOK();
-        std::string line = readLine();
       }
 
       bool 
-      checkPDPContext()
+      checkPDPContext(uint8_t* pdp_context , uint8_t* pdp_state)
       {
         uint8_t ok = 0; 
         std::vector<std::string> arr;
+        flushInput();
         sendAT("+CGACT?");
         //! +CGACT: 1,1
         while (!ok)
@@ -519,11 +540,37 @@ namespace Transports
           std::sscanf(arr[i].c_str(), "+CGACT: %d,%d", &cid, &status);
           if (status > 0)
           {
+            *pdp_context = cid;
+            *pdp_state = status;
             //! Atleast one PDP context is active
             return true;
           }
         }        
         return false;
+      }
+
+      void
+      setupPSDProfile()
+      {
+        uint8_t pdp , state;
+        std::string line;
+        if (checkPDPContext(&pdp , &state) && state > 0)
+        {
+          flushInput();
+          //! Map PSD profile 0 to 1
+          sendAT("+UPSD=0,100," + std::to_string(pdp));
+          line = readLine(); 
+          //! Set PDP Type IPv4
+          sendAT("+UPSD=0,0,0");
+          line = readLine();
+          //! Activate Internal PSD
+          sendAT("+UPSDA=0,3");
+          line = readLine();
+          if (line == "OK")
+          {
+            line = readLine();
+          }
+        }
       }
 
       int
@@ -550,7 +597,6 @@ namespace Transports
       checkSIMStatus()
       {
         std::string bfr = readValue("+CPIN?");
-
         if (bfr == "+CPIN: READY")
         {
           return 1;
@@ -559,16 +605,14 @@ namespace Transports
         {
           return -2;
         }
-
         return -1;
       }
 
       int
       getRATType()
       {
-        sendAT("+COPS?");
-        std::string line = readLine();
-        expectOK();
+        
+        std::string line = readValue("+COPS?");
         if (line.find("+COPS") != std::string::npos)
         {
           std::vector<std::string> tokens;
@@ -587,9 +631,7 @@ namespace Transports
       checkNetworkRegistration()
       {
         int n = -1 , stat = -1;
-        sendAT("+CREG?");
-        std::string line = readLine();
-        expectOK();
+        std::string line = readValue("+CREG?");
         std::sscanf(line.c_str(), "+CREG: %d,%d", &n, &stat);
         return stat;
       }
@@ -634,14 +676,12 @@ namespace Transports
 
       void
       queryRSSI(void)
-      {
-        sendAT("+CSQ");
-        std::string line = readLine();
+      { 
         int rssi = -1;
         int ber = 0;
+        std::string line = readValue("+CSQ");
         if (std::sscanf(line.c_str(), "+CSQ: %d,%d", &rssi, &ber) == 2)
         {
-          expectOK();
           m_rssi = convertRSSI(rssi);
         }
       }
