@@ -101,10 +101,10 @@ namespace Transports
 
       ~TobyL2()
       {
-        
+
       }
 
-      void 
+      void
       initTobyL2(const std::string apn , const std::string pin , const float rssi_timer , const float ntwk_timer , const double smstout)
       {
         m_sms_tout = smstout;
@@ -118,7 +118,7 @@ namespace Transports
         m_task->inf("IMEI : %s " , m_IMEI.c_str());
         //! Set Verbose Output
         setErrorVerbosity(2);
-        //! Set PIN if needed       
+        //! Set PIN if needed
         if (setPIN(pin) > -1)
         {
           //! Get IMSI
@@ -133,17 +133,16 @@ namespace Transports
         setAirplaneMode(false);
       }
 
-      void 
+      void
       updateTobyL2()
       {
         static uint8_t ping_err = 0;
-        static bool setup_psd = true;
         if (m_rssi_querry_timer.overflow())
         {
           if (m_modem_state >= NETWORK_REGISTRATION_DONE )
           {
             queryRSSI();
-            m_task->inf("Current Signal Strength %.2f%% " , m_rssi); 
+            m_task->inf("Current Signal Strength %.2f%% " , m_rssi);
           }
           m_rssi_querry_timer.reset();
         }
@@ -266,13 +265,13 @@ namespace Transports
         }
       }
 
-      void 
+      void
       setRssiTimer(const float rssi_timer)
       {
         m_rssi_querry_timer.setTop(rssi_timer);
       }
 
-      void 
+      void
       setNtwkTimer(const float ntwk_timer)
       {
         m_ntwk_querry_timer.setTop(ntwk_timer);
@@ -287,7 +286,6 @@ namespace Transports
         sms_status.req_id = sms_req->req_id;
         sms_status.info   = info;
         sms_status.status = status;
-
         m_task->dispatch(sms_status);
       }
 
@@ -365,7 +363,7 @@ namespace Transports
             }
           }
         }
-        // Remove read messages.
+        //! Remove read messages.
         if (read_count > 0)
         {
           sendAT("+CMGD=0,3");
@@ -431,7 +429,7 @@ namespace Transports
         }
         return true;
       }
-      
+
       void
       setMessageFormat(unsigned value)
       {
@@ -512,12 +510,11 @@ namespace Transports
         expectOK();
       }
 
-      bool 
+      bool
       checkPDPContext(uint8_t* pdp_context , uint8_t* pdp_state)
       {
-        uint8_t ok = 0; 
+        uint8_t ok = 0;
         std::vector<std::string> arr;
-        flushInput();
         sendAT("+CGACT?");
         //! +CGACT: 1,1
         while (!ok)
@@ -531,7 +528,6 @@ namespace Transports
           {
             arr.push_back(line);
           }
-          
         }
 
         for (uint8_t i = 0 ; i < arr.size() ; i++)
@@ -545,7 +541,7 @@ namespace Transports
             //! Atleast one PDP context is active
             return true;
           }
-        }        
+        }
         return false;
       }
 
@@ -557,9 +553,9 @@ namespace Transports
         if (checkPDPContext(&pdp , &state) && state > 0)
         {
           flushInput();
-          //! Map PSD profile 0 to 1
+          //! Map PSD profile to which ever CGACT is active
           sendAT("+UPSD=0,100," + std::to_string(pdp));
-          line = readLine(); 
+          line = readLine();
           //! Set PDP Type IPv4
           sendAT("+UPSD=0,0,0");
           line = readLine();
@@ -593,7 +589,7 @@ namespace Transports
         }
       }
 
-      int 
+      int
       checkSIMStatus()
       {
         std::string bfr = readValue("+CPIN?");
@@ -611,7 +607,7 @@ namespace Transports
       int
       getRATType()
       {
-        
+
         std::string line = readValue("+COPS?");
         if (line.find("+COPS") != std::string::npos)
         {
@@ -636,7 +632,7 @@ namespace Transports
         return stat;
       }
 
-      void 
+      void
       setAPN(const std::string apn)
       {
         sendAT("+CGDCONT=1,\"IP\",\"" + apn + "\"");
@@ -645,7 +641,7 @@ namespace Transports
         expectOK();
       }
 
-      void 
+      void
       setAirplaneMode(bool enable)
       {
         if (enable)
@@ -653,7 +649,7 @@ namespace Transports
           sendAT("+CFUN=4");
           expectOK();
         }
-        else 
+        else
         {
           //! Set Full Funtionality Mode
           sendAT("+CFUN=1");
@@ -676,7 +672,7 @@ namespace Transports
 
       void
       queryRSSI(void)
-      { 
+      {
         int rssi = -1;
         int ber = 0;
         std::string line = readValue("+CSQ");
@@ -690,7 +686,6 @@ namespace Transports
       convertRSSI(int rssi)
       {
         float cvt = -1.0f;
-
         if (rssi >= 0 && rssi <= 9)
           cvt = (rssi / 9.0) * 25.0f;
         else if (rssi >= 10 && rssi <= 14)
@@ -704,7 +699,6 @@ namespace Transports
 
           cvt = 75.0f + (((rssi - 20) / 11.0f) * 25.0f);
         }
-
         return cvt;
       }
     };
