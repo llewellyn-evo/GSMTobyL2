@@ -8,6 +8,27 @@
 // DUNE headers.
 #include <DUNE/DUNE.hpp>
 
+/* Array to convert the 3G qual number into a median EC_NO_LEV number.
+ */
+                            /* 0   1   2   3   4   5   6  7 */
+const int qualConvert3G[] = {44, 41, 35, 29, 23, 17, 11, 7};
+
+/* Array to convert the 3G "rssi" number into a dBm RSCP value rounded up to the
+ * nearest whole number.
+ */
+const int rscpConvert3G[] = {-108, -105, -103, -100,  -98,  -96,  -94,  -93,   /* 0 - 7 */
+                              -91,  -89,  -88,  -85,  -83,  -80,  -78,  -76,   /* 8 - 15 */
+                              -74,  -73,  -70,  -68,  -66,  -64,  -63,  -60,   /* 16 - 23 */
+                              -58,  -56,  -54,  -53,  -51,  -49,  -48,  -46};  /* 24 - 31 */
+
+/* Array to convert the LTE rssi number into a dBm value rounded up to the
+ * nearest whole number.
+ */
+const int rssiConvertLte[] = {-118, -115, -113, -110, -108, -105, -103, -100,   /* 0 - 7 */
+                               -98,  -95,  -93,  -90,  -88,  -85,  -83,  -80,   /* 8 - 15 */
+                               -78,  -76,  -74,  -73,  -71,  -69,  -68,  -65,   /* 16 - 23 */
+                               -63,  -61,  -60,  -59,  -58,  -55,  -53,  -48};  /* 24 - 31 */
+
 namespace Transports
 {
   namespace GSMTobyL2
@@ -142,7 +163,8 @@ namespace Transports
         {
           if (m_modem_state >= NETWORK_REGISTRATION_DONE )
           {
-            m_rssi = getRSSI();
+            int rat_type = getRATType();
+            m_rssi = getRSSI(rat_type);
             m_task->inf("Current Signal Strength %.2f%% " , m_rssi);
             //! Send RSSI here
           }
@@ -681,38 +703,42 @@ namespace Transports
       }
 
       double
-      getRSSI(void)
+      getRSSI(const int rat_type)
       {
         int rssi = -1;
         int ber = 0;
         std::string line = readValue("+CSQ");
         if (std::sscanf(line.c_str(), "+CSQ: %d,%d", &rssi, &ber) == 2)
         {
-          return convertRSSI(rssi);
+          return convertRSSI(rssi, ber, rat_type);
         }
         return -1;
       }
 
       //! This needs to be fixed.
       //! RSSI conversion is bit different for UBlox Toby L2
+      //! https://github.com/u-blox/nrg-nina-b1/blob/master/ublox-cellular-base/UbloxCellularBase.cpp
       double
-      convertRSSI(int rssi)
+      convertRSSI(const int rssi, int qual, const int rat_type)
       {
-        double cvt = -1.0f;
-        if (rssi >= 0 && rssi <= 9)
-          cvt = (rssi / 9.0) * 25.0f;
-        else if (rssi >= 10 && rssi <= 14)
-          cvt = 25.0f + (((rssi - 10) / 4.0f) * 25.0f);
-        else if (rssi >= 15 && rssi <= 19)
-          cvt = 50.0f + (((rssi - 15) / 4.0f) * 25.0f);
-        else
+        double rssiRet = -1;
+        if ((rssi >= 0) && (rssi <= 31))
         {
-          if (rssi >= 31)
-            rssi = 31;
-
-          cvt = 75.0f + (((rssi - 20) / 11.0f) * 25.0f);
+          if (rat_type > 0 && rat_type < 7)
+          {
+            if ((qual >= 0) && (qual <= 7))
+            {
+              qual = qualConvert3G[qual];
+            }
+            rssiRet = rscpConvert3G[rssi];
+            rssiRet -= qual;
+          }
         }
-        return cvt;
+        else if (rat_type == 7)
+        {
+          rssiRet = rssiConvertLte[rssi];
+        }
+        return rssiRet;
       }
     };
   }
