@@ -47,6 +47,7 @@ namespace Transports
         // Deadline to deliver the
         double deadline;
         // Higher deadlines have less priority.
+
         bool
         operator<(const SmsRequest& other) const
         {
@@ -67,9 +68,9 @@ namespace Transports
       //! Parent task.
       Tasks::Task* m_task;
       //! Timer for RSSI Querry
-      DUNE::Time::Counter<float> m_rssi_querry_timer;
+      DUNE::Time::Counter<double> m_rssi_querry_timer;
       //! Timer for Network Check
-      DUNE::Time::Counter<float> m_ntwk_querry_timer;
+      DUNE::Time::Counter<double> m_ntwk_querry_timer;
       //! IMEI number of the modem
       std::string m_IMEI;
       //! IMSI number of the SIM card
@@ -79,18 +80,20 @@ namespace Transports
       //! Current State of Modem
       uint8_t m_modem_state = INITIAL_STATE;
       //! Signal Strength
-      float m_rssi;
+      double m_rssi;
       //! SMS queue.
       std::priority_queue<SmsRequest> m_queue;
       //! SMS timeout
       double m_sms_tout;
+      //! Ping Value
+      int m_ping;
 
       TobyL2(Tasks::Task* task , SerialPort* uart):
       HayesModem(task, uart),
       m_task(task)
       {
         sendReset();
-        Time::Delay::wait(2.0);
+        //Time::Delay::wait(2.0);
         setLineTrim(true);
         setReadMode(READ_MODE_LINE);
         setTimeout(7.0);
@@ -105,12 +108,9 @@ namespace Transports
       }
 
       void
-      initTobyL2(const std::string apn , const std::string pin , const float rssi_timer , const float ntwk_timer , const double smstout)
+      initTobyL2(const std::string apn , const std::string pin)
       {
-        m_sms_tout = smstout;
         m_task->inf("Initializing the Modem");
-        setRssiTimer(rssi_timer);
-        setNtwkTimer(ntwk_timer);
         setEcho(false);
         setAirplaneMode(true);
         //! Get IMEI
@@ -137,12 +137,14 @@ namespace Transports
       updateTobyL2()
       {
         static uint8_t ping_err = 0;
+
         if (m_rssi_querry_timer.overflow())
         {
           if (m_modem_state >= NETWORK_REGISTRATION_DONE )
           {
-            queryRSSI();
+            m_rssi = getRSSI();
             m_task->inf("Current Signal Strength %.2f%% " , m_rssi);
+            //! Send RSSI here
           }
           m_rssi_querry_timer.reset();
         }
@@ -162,7 +164,7 @@ namespace Transports
             {
               if (checkSIMStatus() == 1)
               {
-                m_modem_state++;;
+                m_modem_state++;
               }
               else
               {
@@ -203,9 +205,9 @@ namespace Transports
                 activatePDPContext();
                 m_modem_state++;
               }
-              else
+              else if (rat_type == 7)
               {
-                //! Connected to LTE network Do not thing Modem auto connents to internet
+                //! Connected to LTE network Do nothing Modem auto connents to internet
                 m_modem_state++;
               }
               break;
@@ -232,30 +234,33 @@ namespace Transports
             {
               uint8_t pdp = 0 , state = 0;
               bool status =  checkPDPContext(&pdp , &state);
-              if ( status == false)
+              if (status == false)
               {
                 m_modem_state = INITIAL_STATE;
               }
               else
               {
-                int ret = pingRemote("www.google.com");
-                if (ret == -2)
+                m_ping = pingRemote("www.google.com");
+                //! PSD is not setup
+                if (m_ping == -2)
                 {
                   setupPSDProfile();
                 }
-                else if (ret == -1)
+                //! Error in Ping
+                //! Ping Can fail when the connection is bad and the ping time exceeds command timeout
+                else if (m_ping == -1)
                 {
                   ping_err++;
-                }
-                else if (ret >= 0)
-                {
-                  ping_err = 0;
-
+                  //! Ping Failed 4 times Check Connection status again.
                   if (ping_err > 4)
                   {
                     ping_err = 0;
                     m_modem_state = INITIAL_STATE;
                   }
+                }
+                else if (m_ping >= 0)
+                {
+                  ping_err = 0;
                 }
               }
               break;
@@ -266,13 +271,19 @@ namespace Transports
       }
 
       void
-      setRssiTimer(const float rssi_timer)
+      setSMSTimeout(const double timeout)
+      {
+        m_sms_tout = timeout;
+      }
+
+      void
+      setRssiTimer(const double rssi_timer)
       {
         m_rssi_querry_timer.setTop(rssi_timer);
       }
 
       void
-      setNtwkTimer(const float ntwk_timer)
+      setNtwkTimer(const double ntwk_timer)
       {
         m_ntwk_querry_timer.setTop(ntwk_timer);
       }
@@ -484,14 +495,13 @@ namespace Transports
           if (line.find("+UUPING:") != std::string::npos)
           {
             std::vector<std::string> tokens;
-            std::istringstream ss(line);
-            std::string token;
-            while(std::getline(ss, token, ','))
+            String::split(line, ",", tokens);
+            if (tokens.size() > 4)
             {
-              tokens.push_back(token);
+              m_task->inf("Ping Value %s " , tokens[5].c_str());
+              std::istringstream iss (tokens[5]);
+              iss >> round_trip_time;
             }
-            m_task->inf("Ping Value %s " , tokens[5].c_str());
-            round_trip_time = std::stoi(tokens[5]);
           }
           else if (line.find("+UUPINGER: 17") != std::string::npos)
           {
@@ -533,8 +543,7 @@ namespace Transports
         for (uint8_t i = 0 ; i < arr.size() ; i++)
         {
           int status = -1 , cid = -1;
-          std::sscanf(arr[i].c_str(), "+CGACT: %d,%d", &cid, &status);
-          if (status > 0)
+          if ((std::sscanf(arr[i].c_str(), "+CGACT: %d,%d", &cid, &status) == 2 ) && status > 0)
           {
             *pdp_context = cid;
             *pdp_state = status;
@@ -552,9 +561,10 @@ namespace Transports
         std::string line;
         if (checkPDPContext(&pdp , &state) && state > 0)
         {
-          flushInput();
           //! Map PSD profile to which ever CGACT is active
-          sendAT("+UPSD=0,100," + std::to_string(pdp));
+          std::stringstream at_command;
+          at_command << "+UPSD=0,100," << pdp;
+          sendAT(at_command.str());
           line = readLine();
           //! Set PDP Type IPv4
           sendAT("+UPSD=0,0,0");
@@ -607,18 +617,15 @@ namespace Transports
       int
       getRATType()
       {
-
+        int number;
         std::string line = readValue("+COPS?");
         if (line.find("+COPS") != std::string::npos)
         {
           std::vector<std::string> tokens;
-          std::istringstream ss(line);
-          std::string token;
-          while(std::getline(ss, token, ','))
-          {
-            tokens.push_back(token);
-          }
-          return std::stoi(tokens[3]);
+          String::split(line, ",", tokens);
+          std::istringstream iss (tokens[3]);
+          iss >> number;
+          return number;
         }
         return -1;
       }
@@ -628,8 +635,11 @@ namespace Transports
       {
         int n = -1 , stat = -1;
         std::string line = readValue("+CREG?");
-        std::sscanf(line.c_str(), "+CREG: %d,%d", &n, &stat);
-        return stat;
+        if (std::sscanf(line.c_str(), "+CREG: %d,%d", &n, &stat) == 2)
+        {
+          return stat;
+        }
+        return -1;
       }
 
       void
@@ -670,22 +680,25 @@ namespace Transports
         return readValue("+CIMI");
       }
 
-      void
-      queryRSSI(void)
+      double
+      getRSSI(void)
       {
         int rssi = -1;
         int ber = 0;
         std::string line = readValue("+CSQ");
         if (std::sscanf(line.c_str(), "+CSQ: %d,%d", &rssi, &ber) == 2)
         {
-          m_rssi = convertRSSI(rssi);
+          return convertRSSI(rssi);
         }
+        return -1;
       }
 
-      float
+      //! This needs to be fixed.
+      //! RSSI conversion is bit different for UBlox Toby L2
+      double
       convertRSSI(int rssi)
       {
-        float cvt = -1.0f;
+        double cvt = -1.0f;
         if (rssi >= 0 && rssi <= 9)
           cvt = (rssi / 9.0) * 25.0f;
         else if (rssi >= 10 && rssi <= 14)

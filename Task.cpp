@@ -49,9 +49,11 @@ namespace Transports
       //! APN name to connect to
       std::string apn_name;
       //! RSSI query timer.
-      float rssi_querry_per;
+      double rssi_querry_per;
       //! Network connection querry period
-      float nwk_querry_per;
+      double nwk_querry_per;
+      //! Network report period
+      double nwk_report_per;
       //! GSM Pin.
       std::string pin;
       //! SMS send timeout (s).
@@ -74,6 +76,8 @@ namespace Transports
       TobyL2* m_modem;
       //! Channel State
       bool m_channel_state = false;
+      //! Timer for Network reports
+      DUNE::Time::Counter<double> m_ntwk_report_timer;
       //! Constructor.
       //! @param[in] name task name.
       //! @param[in] ctx context.
@@ -90,23 +94,28 @@ namespace Transports
         .defaultValue("115200")
         .description("Serial port baud rate");
 
-        param("Power Channel - Names", m_args.pwr_channel_name)
-        .defaultValue("GSM")
-        .description("Device's power channels");
+        param("Power Channel - Name", m_args.pwr_channel_name)
+        .defaultValue("SAT_GSM")
+        .description("GSM Device power channel name");
 
         param("RSSI Querry Periodicity", m_args.rssi_querry_per)
         .defaultValue("10")
         .units(Units::Second)
-        .description("Periodicity of RSSI reports");
+        .description("Periodicity of RSSI querry");
 
         param("Network Querry Periodicity", m_args.nwk_querry_per)
-        .defaultValue("10")
+        .defaultValue("5")
         .units(Units::Second)
-        .description("Periodicity of RSSI reports");
+        .description("Periodicity of network status querry");
 
-        param("PIN", m_args.pin)
+        param("Network Reports Periodicity", m_args.nwk_report_per)
+        .defaultValue("5")
+        .units(Units::Second)
+        .description("Periodicity of network reports");
+
+        param("SIM-PIN", m_args.pin)
         .defaultValue("")
-        .description("PIN Code");
+        .description("SIM card PIN Code");
 
         param("APN", m_args.apn_name)
         .defaultValue("web.vodafone.de")
@@ -143,6 +152,10 @@ namespace Transports
           {
             m_modem->setNtwkTimer(m_args.nwk_querry_per);
           }
+          else if (paramChanged(m_args.sms_tout))
+          {
+            m_modem->setSMSTimeout(m_args.sms_tout);
+          }
         }
       }
 
@@ -166,11 +179,14 @@ namespace Transports
         IMC::PowerChannelControl pcc;
         pcc.name = m_args.pwr_channel_name;
         pcc.op = IMC::PowerChannelControl::PCC_OP_TURN_ON;
+
         while (!m_channel_state && !stopping())
         {
           Time::Delay::wait(2.0);
           if (m_args.start_gsm)
+          {
             dispatch(pcc);
+          }
           waitForMessages(0.05);
           this->inf("Waiting for channel to be turned ON");
         }
@@ -183,7 +199,11 @@ namespace Transports
             //! Create Handle for Serial Port to configure GSM Modem
             m_uart = new SerialPort(m_args.uart_dev, m_args.uart_baud);
             m_modem = new TobyL2(this , m_uart);
-            m_modem->initTobyL2(m_args.apn_name ,  m_args.pin , m_args.rssi_querry_per ,  m_args.nwk_querry_per , m_args.sms_tout);
+            m_modem->initTobyL2(m_args.apn_name ,  m_args.pin);
+            m_modem->setSMSTimeout(m_args.sms_tout);
+            m_modem->setNtwkTimer(m_args.nwk_querry_per);
+            m_modem->setRssiTimer(m_args.rssi_querry_per);
+            m_ntwk_report_timer.setTop(m_args.nwk_report_per);
           }
           catch(...)
           {
@@ -246,6 +266,25 @@ namespace Transports
         sms_req.deadline = Clock::getSinceEpoch() + msg->timeout;
         m_modem->m_queue.push(sms_req);
         m_modem->sendSmsStatus(&sms_req,IMC::SmsStatus::SMSSTAT_QUEUED,DTR("SMS sent to queue"));
+      }
+
+      void
+      sendNetworkReports()
+      {
+        if (m_ntwk_report_timer.overflow())
+        {
+          //! Dispatch RSSI
+          IMC::RSSI rssi;
+          rssi.value = m_modem->m_rssi;
+          dispatch(rssi);
+
+          //! Dispatch Link Latency
+          IMC::LinkLatency link_latency;
+          link_latency.value = (m_modem->m_ping) ? (m_modem->m_ping / 1000.0):m_modem->m_ping;
+          dispatch(link_latency);
+
+          m_ntwk_report_timer.reset();
+        }
       }
 
       //! Main loop.
