@@ -293,7 +293,17 @@ namespace Transports
       {
         while (!stopping())
         {
-          m_modem->updateTobyL2();
+          sendNetworkReports();
+          try
+          {
+            m_modem->updateTobyL2();
+          }
+          catch(...)
+          {
+            //! Timeout error. Or GSM modem turned OFF(Serial will dissapear)
+            throw RestartNeeded(DTR("Restarting.."), 1);
+          }
+
           waitForMessages(0.05);
         }
       }
