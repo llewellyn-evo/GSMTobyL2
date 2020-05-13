@@ -131,7 +131,6 @@ namespace Transports
         .description("Maximum amount of time to wait for SMS send completion");
 
         bind<IMC::PowerChannelState>(this);
-        bind<IMC::SmsRequest>(this);
       }
 
       //! Update internal state with new parameter values.
@@ -204,6 +203,8 @@ namespace Transports
             m_modem->setNtwkTimer(m_args.nwk_querry_per);
             m_modem->setRssiTimer(m_args.rssi_querry_per);
             m_ntwk_report_timer.setTop(m_args.nwk_report_per);
+            //! Now that its initialized accept SMS send request
+            bind<IMC::SmsRequest>(this);
           }
           catch(...)
           {
